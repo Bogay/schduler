@@ -79,15 +79,16 @@ fn main() {
         };
     }
 
-    // let input = Input {
-    //     row: 6,
-    //     cols: vec![(5, 6), (4, 6), (4, 6), (4, 6), (2, 5), (2, 5)],
-    //     n_people: 30,
-    //     max_co_assign: 2,
-    // };
+    // let input = random_input();
+    // eprintln!("{input:?}");
 
-    let input = random_input();
-    eprintln!("{input:?}");
+    let input = Input {
+        row: 6,
+        cols: vec![(1, 1), (1, 1), (1, 1), (1, 1), (1, 1), (1, 2)],
+        n_people: 6,
+        max_co_assign: 2,
+    };
+    assert!(is_valid(&input));
 
     let names = (0..input.n_people).map(|i| format!("P{i}")).collect_vec();
     let ms = names

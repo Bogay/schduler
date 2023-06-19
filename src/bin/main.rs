@@ -1,14 +1,19 @@
-use std::cmp::min;
-
 use itertools::Itertools;
 use rand::{seq::SliceRandom, thread_rng, Rng};
+use std::{cmp::min, process::exit};
 use z3::ast::*;
 
 #[derive(Debug)]
 struct Input {
+    /// row size of output, i.e. how many sections should be scheduled
     row: usize,
+    /// (min, max) of human resource requirement for every room
     cols: Vec<(usize, usize)>,
+    /// how many people should be scheduled
     n_people: usize,
+    /// for every people, the max times it can be assigned to the same people.
+    /// for example, if `max_co_assign` is 1, every two people can be assigned to
+    /// a same location at most once.
     max_co_assign: i32,
 }
 
@@ -28,13 +33,14 @@ fn mat<'a>(
 }
 
 fn is_valid(input: &Input) -> bool {
+    let is_range_valid = input.cols.iter().all(|(mn, mx)| mn <= mx);
     let is_row_lo_valid = input.cols.iter().map(|(c, _)| c).sum::<usize>() <= input.n_people;
     let is_row_hi_valid = input.cols.iter().map(|(_, c)| c).sum::<usize>() >= input.n_people;
     let is_cols_lo_hi_valid = input
         .cols
         .iter()
         .all(|(mn, mx)| mn * input.row <= input.n_people && mx * input.row >= input.n_people);
-    is_row_lo_valid && is_row_hi_valid && is_cols_lo_hi_valid
+    is_range_valid && is_row_lo_valid && is_row_hi_valid && is_cols_lo_hi_valid
 }
 
 fn random_input() -> Input {
@@ -83,10 +89,10 @@ fn main() {
     // eprintln!("{input:?}");
 
     let input = Input {
-        row: 6,
-        cols: vec![(1, 1), (1, 1), (1, 1), (1, 1), (1, 1), (1, 2)],
-        n_people: 6,
-        max_co_assign: 2,
+        row: 5,
+        cols: vec![(3, 4), (3, 4), (3, 4), (3, 4), (3, 4)],
+        n_people: 16,
+        max_co_assign: 3,
     };
     assert!(is_valid(&input));
 
@@ -99,11 +105,8 @@ fn main() {
     // for each matrix (i.e. staff)
     for m in &ms {
         for row in m {
-            solver.assert(
-                &Int::add(&context, &row.iter().collect_vec())
-                    ._eq(&z_i64!(1))
-                    .simplify(),
-            );
+            let row_sum = Int::add(&context, &row.iter().collect_vec()).simplify();
+            solver.assert(&row_sum._eq(&z_i64!(1)));
         }
 
         for c in 0..input.cols.len() {
@@ -150,22 +153,46 @@ fn main() {
         for c in 0..input.cols.len() {
             let assigned_cnt = &Int::add(&context, &ms.iter().map(|m| &m[r][c]).collect_vec());
             let (mn, mx) = input.cols[c];
-            solver.assert(
-                &(assigned_cnt.ge(&z_i64!(mn as i64)) & assigned_cnt.le(&z_i64!(mx as i64))),
-            );
+            if mn == mx {
+                solver.assert(&assigned_cnt._eq(&z_i64!(mn as i64)));
+            } else {
+                solver.assert(
+                    &(assigned_cnt.ge(&z_i64!(mn as i64)) & assigned_cnt.le(&z_i64!(mx as i64))),
+                );
+            }
         }
     }
 
-    let step = 1;
-    for _ in 0..step {
-        let res = solver.check();
-        if !matches!(res, z3::SatResult::Sat) {
-            eprintln!("Unable to find solution: {:?}", res);
-            break;
+    let randomize = false;
+    let res = solver.check();
+    if !matches!(res, z3::SatResult::Sat) {
+        eprintln!("Unable to find solution: {:?}", res);
+        exit(1);
+    }
+
+    let model = solver.get_model().unwrap();
+    let mut schedule = vec![vec![Vec::<&str>::new(); input.cols.len()]; input.row];
+    for (name, m) in names.iter().zip(ms.iter()) {
+        for r in 0..input.row {
+            for c in 0..input.cols.len() {
+                let assigned = model.eval(&m[r][c], true).unwrap().as_i64().unwrap() == 1;
+                if assigned {
+                    schedule[r][c].push(name);
+                }
+            }
         }
+    }
+
+    if randomize {
+        let mut rng = thread_rng();
+        let r = rng.gen_range(0..input.row);
+        let c = rng.gen_range(0..input.cols.len());
+        let name = schedule[r][c].choose(&mut rng).unwrap();
+        let mi = name.strip_prefix("P").unwrap().parse::<usize>().unwrap();
+        solver.assert(&ms[mi][r][c]._eq(&z_i64!(0)));
 
         let model = solver.get_model().unwrap();
-        let mut schedule = vec![vec![Vec::<&str>::new(); input.cols.len()]; input.row];
+        schedule = vec![vec![Vec::<&str>::new(); input.cols.len()]; input.row];
         for (name, m) in names.iter().zip(ms.iter()) {
             for r in 0..input.row {
                 for c in 0..input.cols.len() {
@@ -176,48 +203,39 @@ fn main() {
                 }
             }
         }
+    }
 
-        // let weights = calculate_weights(&schedule);
-        // eprintln!("Weights:");
-        // for row in &weights {
-        //     eprintln!("{row:?}");
-        // }
+    let weights = calculate_weights(&schedule);
+    eprintln!("Weights:");
+    for row in &weights {
+        eprintln!("{row:?}");
+    }
 
-        // eprintln!("Staff assigned to rooms:");
-        // for (name, m) in names.iter().zip(ms.iter()) {
-        //     let mut count = vec![0; input.cols.len()];
-        //     for c in 0..input.cols.len() {
-        //         for r in 0..input.row {
-        //             let assigned = model.eval(&m[r][c], true).unwrap().as_i64().unwrap();
-        //             count[c] += assigned;
-        //         }
-        //     }
-        //     eprintln!("{name:4}: {count:?}");
-        // }
-
-        // eprintln!("Final schedule:");
-        let num_w = names.iter().map(|n| n.len()).max().unwrap();
-        let max_n = schedule
-            .iter()
-            .flat_map(|r| r.iter().map(|x| x.len()))
-            .max()
-            .unwrap();
-        let str_w = (max_n - 1) * 2 + max_n * num_w;
-        for row in &schedule {
-            for s in row {
-                let s = s.iter().map(|x| format!("{x:>num_w$}")).join(", ");
-                print!("[ {s:>str_w$}] ");
+    eprintln!("Staff assigned to rooms:");
+    for (name, m) in names.iter().zip(ms.iter()) {
+        let mut count = vec![0; input.cols.len()];
+        for c in 0..input.cols.len() {
+            for r in 0..input.row {
+                let assigned = model.eval(&m[r][c], true).unwrap().as_i64().unwrap();
+                count[c] += assigned;
             }
-
-            println!("");
         }
+        eprintln!("{name:4}: {count:?}");
+    }
 
-        let mut rng = thread_rng();
-        let r = rng.gen_range(0..input.row);
-        let c = rng.gen_range(0..input.cols.len());
-        let name = schedule[r][c].choose(&mut rng).unwrap();
-        let mi = name.strip_prefix("P").unwrap().parse::<usize>().unwrap();
-        solver.assert(&ms[mi][r][c]._eq(&z_i64!(0)));
+    eprintln!("Final schedule:");
+    let num_w = names.iter().map(|n| n.len()).max().unwrap();
+    let max_n = schedule
+        .iter()
+        .flat_map(|r| r.iter().map(|x| x.len()))
+        .max()
+        .unwrap();
+    let str_w = (max_n - 1) * 2 + max_n * num_w;
+    for row in &schedule {
+        for s in row {
+            let s = s.iter().map(|x| format!("{x:>num_w$}")).join(", ");
+            print!("[ {s:>str_w$}] ");
+        }
 
         println!("");
     }
@@ -226,7 +244,7 @@ fn main() {
 #[allow(dead_code)]
 fn calculate_weights(result: &Vec<Vec<Vec<&str>>>) -> Vec<Vec<usize>> {
     let n = result[0].iter().map(|s| s.len()).sum();
-    let mut weights: Vec<_> = (0..n).into_iter().map(|_| vec![0usize; n]).collect();
+    let mut weights = vec![vec![0usize; n]; n];
 
     for row in result {
         for s in row {
